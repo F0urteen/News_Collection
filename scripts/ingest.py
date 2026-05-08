@@ -1,8 +1,8 @@
 """
-Feishu Base 入库脚本（直接调用 Open API，无需 larksuite-cli）
+Feishu Base 入库脚本
+- 获取 App Access Token（自动刷新）
 - 查询当日已有记录（用于去重）
 - 批量写入新记录
-- 使用 FEISHU_USER_TOKEN 环境变量认证
 """
 import json
 import sys
@@ -15,11 +15,50 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config, dedup
 
 FEISHU_API = "https://open.feishu.cn/open-apis"
+_app_token_cache = None
+_app_token_expires_at = 0
+
+
+def get_app_access_token() -> str:
+    """获取 App Access Token，自动处理缓存"""
+    global _app_token_cache, _app_token_expires_at
+
+    # 缓存有效（提前 60s 刷新）
+    if _app_token_cache and time.time() < _app_token_expires_at - 60:
+        return _app_token_cache
+
+    import urllib.request
+
+    app_id = os.environ.get("FEISHU_APP_ID", "").strip()
+    app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
+
+    if not app_id or not app_secret:
+        print("[认证] 缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET")
+        sys.exit(1)
+
+    body = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
+    req = urllib.request.Request(
+        f"{FEISHU_API}/auth/v3/tenant_access_token/internal",
+        data=body, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        result = json.loads(resp.read())
+
+    if result.get("code") != 0:
+        print(f"[认证失败] {result.get('msg')}")
+        sys.exit(1)
+
+    _app_token_cache = result["tenant_access_token"]
+    _app_token_expires_at = time.time() + result.get("expire", 7200)
+    print(f"[认证] App Access Token 获取成功，有效期 {result.get('expire', 7200)}s")
+    return _app_token_cache
 
 
 def _api(method: str, path: str, token: str, data: dict = None) -> dict:
     """直接调用飞书 Open API"""
     import urllib.request
+
     url = f"{FEISHU_API}{path}"
     body = json.dumps(data).encode() if data else None
     req = urllib.request.Request(
@@ -37,17 +76,11 @@ def _api(method: str, path: str, token: str, data: dict = None) -> dict:
 
 
 def _api_records_search(token: str, filter_str: str = None) -> list:
-    """
-    查询记录，支持 filter 条件
-    返回记录列表
-    """
+    """查询记录，支持翻页"""
     records = []
     page_token = None
     while True:
-        params = {
-            "page_size": 100,
-            "field_ids": f"{config.FIELD_DATE},{config.FIELD_TITLE},{config.FIELD_URL},{config.FIELD_CAT},{config.FIELD_SOURCE}",
-        }
+        params = {"page_size": 100}
         if filter_str:
             params["filter"] = filter_str
         if page_token:
@@ -58,16 +91,15 @@ def _api_records_search(token: str, filter_str: str = None) -> list:
             f"/bitable/v1/apps/{config.BASE_TOKEN}/tables/{config.TABLE_ID}/records?{query_str}",
             token
         )
-        if not resp.get("ok"):
+        if resp.get("code") != 0:
             print(f"[查询] 失败: {resp.get('msg')}")
             break
         items = resp.get("data", {}).get("items", [])
         records.extend(items)
-        has_more = resp.get("data", {}).get("has_more", False)
-        if not has_more:
+        if not resp.get("data", {}).get("has_more"):
             break
         page_token = resp.get("data", {}).get("page_token")
-        time.sleep(0.2)  # 避免频率限制
+        time.sleep(0.2)
 
     return records
 
@@ -75,7 +107,7 @@ def _api_records_search(token: str, filter_str: str = None) -> list:
 def query_today_records(token: str) -> list[dict]:
     """查询今日已入库记录，用于去重"""
     today_str = datetime.now().strftime("%Y/%m/%d")
-    filter_str = f'AND(RECORD_DATETIME(\"{config.FIELD_DATE}\")=\"{today_str}\")'
+    filter_str = f'AND(RECORD_DATETIME("{config.FIELD_DATE}")="{today_str}")'
     records = _api_records_search(token, filter_str)
     print(f"[查询] 今日已有 {len(records)} 条记录")
     return records
@@ -95,10 +127,7 @@ def batch_ingest(token: str, items: list[dict]) -> tuple[int, int]:
 
     for i in range(0, len(items), BATCH_SIZE):
         batch = items[i:i + BATCH_SIZE]
-        records = []
-        for item in batch:
-            fields = build_fields(item)
-            records.append({"fields": fields})
+        records = [{"fields": build_fields(item)} for item in batch]
 
         resp = _api("POST",
             f"/bitable/v1/apps/{config.BASE_TOKEN}/tables/{config.TABLE_ID}/records/batch_create",
@@ -106,12 +135,11 @@ def batch_ingest(token: str, items: list[dict]) -> tuple[int, int]:
             {"records": records}
         )
 
-        if resp.get("ok"):
+        if resp.get("code") == 0:
             cnt = len(resp.get("data", {}).get("records", []))
             success += cnt
             print(f"[入库] 第 {i//BATCH_SIZE+1} 批成功 {cnt} 条")
         else:
-            # 逐条 fallback
             print(f"[入库] 批量失败({resp.get('msg')})，切换逐条模式")
             for item in batch:
                 ok, msg = _ingest_single(token, item)
@@ -119,7 +147,7 @@ def batch_ingest(token: str, items: list[dict]) -> tuple[int, int]:
                     success += 1
                 else:
                     failed += 1
-                    print(f"  失败: {item['title'][:30]} - {msg[:80]}")
+                    print(f"  失败: {item.get('title','')[:30]} - {msg[:80]}")
         time.sleep(0.3)
 
     return success, failed
@@ -133,7 +161,7 @@ def _ingest_single(token: str, item: dict) -> tuple[bool, str]:
         token,
         {"fields": fields}
     )
-    if resp.get("ok"):
+    if resp.get("code") == 0:
         return True, ""
     return False, resp.get("msg", "")
 
@@ -147,39 +175,35 @@ def build_fields(record: dict) -> dict:
     hot = record.get("hot") or dedup.auto_hot_level(record)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    fields = {
+    return {
         config.FIELD_STATUS: "待审核",
         config.FIELD_SOURCE: source,
         config.FIELD_TITLE:  record.get("title", "").strip(),
         config.FIELD_URL:    url,
         config.FIELD_NOTE:   summary,
-        config.FIELD_CAT:   category,
-        config.FIELD_HOT:   hot,
-        config.FIELD_DATE:  now,
+        config.FIELD_CAT:    category,
+        config.FIELD_HOT:    hot,
+        config.FIELD_DATE:   now,
     }
-    return fields
 
 
 def run():
     """主入口：读取 collected.json → 去重 → 入库"""
-    token = os.environ.get("FEISHU_USER_TOKEN", "").strip()
-    if not token:
-        print("[错误] 缺少 FEISHU_USER_TOKEN 环境变量")
-        sys.exit(1)
+    token = get_app_access_token()
 
     # 读取采集结果
     SCRIPT_DIR = Path(__file__).parent
     raw_file = SCRIPT_DIR / "collected.json"
     if not raw_file.exists():
         print("[入库] 无新数据文件，退出")
-        return
+        return {"success": 0, "failed": 0, "deduped": 0, "total_raw": 0}
 
     with open(raw_file, "r", encoding="utf-8") as f:
         new_items = json.load(f)
 
     if not new_items:
         print("[入库] 无新数据，退出")
-        return
+        return {"success": 0, "failed": 0, "deduped": 0, "total_raw": 0}
 
     print(f"[入库] 待处理 {len(new_items)} 条")
 
@@ -187,9 +211,9 @@ def run():
     existing = query_today_records(token)
     existing_for_dedup = [
         {
-            "title": r.get("fields", {}).get(config.FIELD_TITLE, ""),
-            "url":   r.get("fields", {}).get(config.FIELD_URL, ""),
-            "source": r.get("fields", {}).get(config.FIELD_SOURCE, ""),
+            "title":   r.get("fields", {}).get(config.FIELD_TITLE, ""),
+            "url":     r.get("fields", {}).get(config.FIELD_URL, ""),
+            "source":  r.get("fields", {}).get(config.FIELD_SOURCE, ""),
         }
         for r in existing
     ]
