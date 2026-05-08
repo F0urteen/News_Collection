@@ -75,14 +75,12 @@ def _api(method: str, path: str, token: str, data: dict = None) -> dict:
         return result
 
 
-def _api_records_search(token: str, filter_str: str = None) -> list:
-    """查询记录，支持翻页"""
+def _api_records_all(token: str) -> list:
+    """查询全部记录，支持翻页（不再依赖 filter 参数）"""
     records = []
     page_token = None
     while True:
         params = {"page_size": 100}
-        if filter_str:
-            params["filter"] = filter_str
         if page_token:
             params["page_token"] = page_token
 
@@ -105,12 +103,17 @@ def _api_records_search(token: str, filter_str: str = None) -> list:
 
 
 def query_today_records(token: str) -> list[dict]:
-    """查询今日已入库记录，用于去重"""
+    """查询今日已入库记录，用于去重（本地过滤，避免 API filter 格式问题）"""
     today_str = datetime.now().strftime("%Y/%m/%d")
-    filter_str = f'AND(RECORD_DATETIME("{config.FIELD_DATE}")="{today_str}")'
-    records = _api_records_search(token, filter_str)
-    print(f"[查询] 今日已有 {len(records)} 条记录")
-    return records
+    print(f"[查询] 获取全量记录（本地过滤 {today_str}）...")
+    all_records = _api_records_all(token)
+
+    today_records = [
+        r for r in all_records
+        if r.get("fields", {}).get(config.FIELD_DATE, "").startswith(today_str)
+    ]
+    print(f"[查询] 今日已有 {len(today_records)} 条记录（总记录 {len(all_records)} 条）")
+    return today_records
 
 
 def batch_ingest(token: str, items: list[dict]) -> tuple[int, int]:
