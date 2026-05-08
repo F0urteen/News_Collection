@@ -46,25 +46,17 @@ def main():
     print(f"\n[汇总] 共采集 {len(all_items)} 条原始数据")
     print(f"已保存到 {tmp_file}")
 
-    # 5. 入库（通过 stdin 传递）
+    # 5. 入库
     print("\n[Step 4] 入库飞书 Base")
-    with open(tmp_file, "r", encoding="utf-8") as f:
-        raw = f.read()
-    # 用环境变量告诉 ingest 用 larksuite-cli 路径
-    os.environ["LARKSUITE_CLI"] = os.environ.get("LARKSUITE_CLI", "larksuite-cli")
-
-    # 直接调用 ingest.run()
-    sys.stdin = open(tmp_file, "r", encoding="utf-8")
     result = ingest.run()
-    sys.stdin.close()
 
     # 6. 写入结果摘要
     summary_file = SCRIPT_DIR / "result.json"
     result["total_collected"] = len(all_items)
     result["sources"] = {
-        "taptap":  len(taptap_items),
+        "taptap":   len(taptap_items),
         "bilibili": len(bili_items),
-        "kaola":   len(kaola_items),
+        "kaola":    len(kaola_items),
     }
     with open(summary_file, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
