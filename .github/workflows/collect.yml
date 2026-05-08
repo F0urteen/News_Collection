@@ -1,31 +1,28 @@
 name: 热点新闻采集
+
 on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
+
 jobs:
   collect:
     name: 采集与入库
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt -q
-      - name: 配置 larksuite-cli
-        env:
-          LARKSUITE_TOKEN: ${{ secrets.LARKSUITE_TOKEN }}
-          LARKSUITE_REFRESH_TOKEN: ${{ secrets.LARKSUITE_REFRESH_TOKEN }}
-        run: |
-          echo "$LARKSUITE_TOKEN" | larksuite-cli auth login --stdin
       - name: 执行采集脚本
         env:
-          LARKSUITE_CLI: larksuite-cli
+          FEISHU_USER_TOKEN: ${{ secrets.FEISHU_USER_TOKEN }}
         run: |
+          echo "========== 采集开始 $(date '+%Y-%m-%d %H:%M:%S') =========="
           cd scripts
-          python main.py 2>&1
+          python3 main.py 2>&1          
       - name: 上传采集结果
         if: always()
         uses: actions/upload-artifact@v4
