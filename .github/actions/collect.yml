@@ -1,0 +1,80 @@
+name: 热点新闻采集
+
+on:
+  # 每天北京时间 10:00（UTC 02:00）执行
+  schedule:
+    - cron: "0 2 * * *"
+  # 手动触发（可从 GitHub Actions 页面手动运行）
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "强制执行（忽略去重，直接入库）"
+        required: false
+        default: "false"
+
+jobs:
+  collect:
+    name: 采集与入库
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ── 1. 拉取代码 ───────────────────────────────────────────
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      # ── 2. 安装 Python ─────────────────────────────────────────
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. 安装依赖 ───────────────────────────────────────────
+      - name: 安装 Python 依赖
+        run: pip install -r requirements.txt -q
+
+      # ── 4. 配置 larksuite-cli ──────────────────────────────────
+      - name: 配置 larksuite-cli
+        env:
+          LARKSUITE_TOKEN: ${{ secrets.LARKSUITE_TOKEN }}
+          LARKSUITE_REFRESH_TOKEN: ${{ secrets.LARKSUITE_REFRESH_TOKEN }}
+        run: |
+          echo "配置飞书认证..."
+          # 检查是否已有登录缓存
+          if [ -d ~/.config/larksuite-cli ]; then
+            echo "larksuite-cli 已配置，跳过"
+          else
+            echo "$LARKSUITE_TOKEN" | larksuite-cli auth login --stdin
+          fi
+          larksuite-cli --version
+
+      # ── 5. 执行采集脚本 ────────────────────────────────────────
+      - name: 执行采集脚本
+        env:
+          LARKSUITE_CLI: larksuite-cli
+        run: |
+          echo "========== 开始采集 $(date '+%Y-%m-%d %H:%M:%S') =========="
+          cd scripts
+          python main.py 2>&1
+          echo "========== 采集结束 =========="
+
+      # ── 6. 保存结果摘要 ────────────────────────────────────────
+      - name: 上传采集结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collect-result-${{ github.run_number }}
+          path: scripts/result.json
+          retention-days: 7
+
+      # ── 7. 推送结果摘要到飞书（可选）────────────────────────
+      - name: 推送飞书通知
+        if: success()
+        env:
+          LARKSUITE_CLI: larksuite-cli
+        run: |
+          RESULT=$(cat scripts/result.json)
+          SUCCESS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('success',0))")
+          DEDUP=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('deduped',0))")
+          TOTAL=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total_collected',0))")
+          echo "采集结果: 入库 $SUCCESS 条 / 过滤 $DEDUP 条 / 原始 $TOTAL 条"
