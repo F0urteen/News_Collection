@@ -18,7 +18,8 @@ jobs:
           python-version: "3.11"
       - name: 执行采集脚本
         env:
-          FEISHU_USER_TOKEN: ${{ secrets.FEISHU_USER_TOKEN }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
         run: |
           echo "========== 采集开始 $(date '+%Y-%m-%d %H:%M:%S') =========="
           cd scripts
